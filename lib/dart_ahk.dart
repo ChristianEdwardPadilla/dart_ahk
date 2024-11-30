@@ -25,6 +25,12 @@ Map<String, List<KeyStep>> keyMapping = {
 };
 int keyHook = 0;
 
+// Add a flag to track if we're currently executing a sequence, effectively
+// preventing recursive execution of instructions.
+//
+//(Not yet confirmed if this is a real issue, but seems reasonable to avoid).
+bool isExecutingSequence = false;
+
 void main() {
   // Create callable function for the hook.
   final lpfn = NativeCallable<HOOKPROC>.isolateLocal(
@@ -123,8 +129,8 @@ int lowLevelKeyboardHookProc(int code, int wParam, int lParam) {
   if (code == HC_ACTION && isTargetWindowActive()) {
     final kbs = Pointer<KBDLLHOOKSTRUCT>.fromAddress(lParam);
 
-    // Check if this is an injected input (from our own SendInput calls).
-    if ((kbs.ref.flags & 0x00000010) == 0) {
+    // Only process if not injected and not currently executing a sequence.
+    if ((kbs.ref.flags & 0x00000010) == 0 && !isExecutingSequence) {
       // LLKHF_INJECTED
       final keyChar = String.fromCharCode(kbs.ref.vkCode);
 
@@ -133,7 +139,9 @@ int lowLevelKeyboardHookProc(int code, int wParam, int lParam) {
         // Only process WM_KEYDOWN events.
         if (wParam == WM_KEYDOWN) {
           print('Intercepted key press: $keyChar');
+          isExecutingSequence = true;
           executeKeySequence(keyMapping[keyChar]!);
+          isExecutingSequence = false;
         }
         return -1; // Prevent the original key from being processed.
       }

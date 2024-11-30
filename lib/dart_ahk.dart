@@ -129,6 +129,7 @@ int lowLevelKeyboardHookProc(int code, int wParam, int lParam) {
 
       // Check if this key is in our mapping
       if (keyMapping.containsKey(keyChar)) {
+        // Only process WM_KEYDOWN events
         if (wParam == WM_KEYDOWN) {
           print('Intercepted key press: $keyChar');
           executeKeySequence(keyMapping[keyChar]!);
@@ -136,11 +137,7 @@ int lowLevelKeyboardHookProc(int code, int wParam, int lParam) {
         return -1; // Prevent the original key from being processed
       }
     }
-
-    // Small sleep to prevent high CPU usage
-    sleep(const Duration(milliseconds: 10));
   }
-
   return CallNextHookEx(keyHook, code, wParam, lParam);
 }
 

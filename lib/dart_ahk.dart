@@ -175,7 +175,7 @@ void main() {
   };
 
   final interceptor = KeyInterceptor(
-    targetProcessName: 'PathOfExile.exe',
+    targetProcessName: 'chrome',
     inputMapping: inputMap,
   );
 

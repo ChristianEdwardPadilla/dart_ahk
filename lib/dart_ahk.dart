@@ -58,101 +58,94 @@ class Wait implements KeyStep {
   }
 }
 
-class KeyInterceptor {
-  final String targetProcessName;
-  final Map<String, List<KeyStep>> inputMapping;
+// Global variables for state management
+int keyHook = 0;
+String targetProcessName = '';
+Map<String, List<KeyStep>> keyMapping = {};
 
-  KeyInterceptor({
-    required this.targetProcessName,
-    required this.inputMapping,
-  });
+bool isTargetWindowActive() {
+  final hwnd = GetForegroundWindow();
+  final pidPtr = calloc<DWORD>();
 
-  bool _isTargetWindowActive() {
-    final hwnd = GetForegroundWindow();
-    final pidPtr = calloc<Uint32>();
+  try {
+    GetWindowThreadProcessId(hwnd, pidPtr);
+    final pid = pidPtr.value;
+
+    final processHandle = OpenProcess(
+      PROCESS_ACCESS_RIGHTS.PROCESS_QUERY_INFORMATION |
+          PROCESS_ACCESS_RIGHTS.PROCESS_VM_READ,
+      FALSE,
+      pid,
+    );
+
+    if (processHandle == 0) return false;
 
     try {
-      GetWindowThreadProcessId(hwnd, pidPtr);
-      final pid = pidPtr.value;
-
-      final processHandle = OpenProcess(
-        PROCESS_ACCESS_RIGHTS.PROCESS_QUERY_INFORMATION |
-            PROCESS_ACCESS_RIGHTS.PROCESS_VM_READ,
-        FALSE,
-        pid,
-      );
-
-      if (processHandle == 0) return false;
-
-      try {
-        final processName = _getProcessNameFromHandle(processHandle);
-        return processName
-            .toLowerCase()
-            .contains(targetProcessName.toLowerCase());
-      } finally {
-        CloseHandle(processHandle);
-      }
+      final processName = getProcessNameFromHandle(processHandle);
+      return processName
+          .toLowerCase()
+          .contains(targetProcessName.toLowerCase());
     } finally {
-      free(pidPtr);
+      CloseHandle(processHandle);
     }
-  }
-
-  String _getProcessNameFromHandle(int processHandle) {
-    final processNameBuffer = wsalloc(MAX_PATH);
-    try {
-      final processNameLength = GetProcessImageFileName(
-        processHandle,
-        processNameBuffer,
-        MAX_PATH,
-      );
-
-      if (processNameLength > 0) {
-        final processName = processNameBuffer.toDartString();
-        return processName.split(r'\').last;
-      }
-      return '';
-    } finally {
-      free(processNameBuffer);
-    }
-  }
-
-  void _executeKeySequence(List<KeyStep> sequence) {
-    for (final step in sequence) {
-      step.execute();
-    }
-  }
-
-  void startListening() {
-    print('Listening for key interception...');
-    while (true) {
-      if (_isTargetWindowActive()) {
-        // Check each mapped input key
-        for (final entry in inputMapping.entries) {
-          final keyChar = entry.key;
-          final sequence = entry.value;
-
-          // Convert key string to virtual key code
-          final keyCode = keyChar.toUpperCase().codeUnitAt(0);
-
-          // Check if the key is newly pressed
-          final keyState = GetAsyncKeyState(keyCode);
-          if ((keyState & 0x8000) != 0) {
-            print('Intercepted key press: $keyChar');
-            _executeKeySequence(sequence);
-
-            // Brief pause to prevent multiple triggers
-            sleep(const Duration(milliseconds: 200));
-          }
-        }
-      }
-
-      // Small sleep to prevent high CPU usage
-      sleep(const Duration(milliseconds: 10));
-    }
+  } finally {
+    free(pidPtr);
   }
 }
 
+String getProcessNameFromHandle(int processHandle) {
+  final processNameBuffer = wsalloc(MAX_PATH);
+  try {
+    final processNameLength = GetProcessImageFileName(
+      processHandle,
+      processNameBuffer,
+      MAX_PATH,
+    );
+
+    if (processNameLength > 0) {
+      final processName = processNameBuffer.toDartString();
+      return processName.split(r'\').last;
+    }
+    return '';
+  } finally {
+    free(processNameBuffer);
+  }
+}
+
+void executeKeySequence(List<KeyStep> sequence) {
+  for (final step in sequence) {
+    step.execute();
+  }
+}
+
+int lowLevelKeyboardHookProc(int code, int wParam, int lParam) {
+  if (code == HC_ACTION && isTargetWindowActive()) {
+    final kbs = Pointer<KBDLLHOOKSTRUCT>.fromAddress(lParam);
+
+    // Check if this is an injected input (from our own SendInput calls)
+    if ((kbs.ref.flags & 0x00000010) == 0) {
+      // LLKHF_INJECTED
+      final keyChar = String.fromCharCode(kbs.ref.vkCode);
+
+      // Check if this key is in our mapping
+      if (keyMapping.containsKey(keyChar)) {
+        if (wParam == WM_KEYDOWN) {
+          print('Intercepted key press: $keyChar');
+          executeKeySequence(keyMapping[keyChar]!);
+        }
+        return -1; // Prevent the original key from being processed
+      }
+    }
+
+    // Small sleep to prevent high CPU usage
+    sleep(const Duration(milliseconds: 10));
+  }
+
+  return CallNextHookEx(keyHook, code, wParam, lParam);
+}
+
 void main() {
+  // Initialize key mappings
   final outputA = [
     Press("1"),
     Wait(50, 20),
@@ -169,19 +162,47 @@ void main() {
     Wait(45, 10),
   ];
 
-  final inputMap = {
+  keyMapping = {
     "2": outputA,
     "5": outputB,
   };
 
-  final interceptor = KeyInterceptor(
-    targetProcessName: 'chrome',
-    inputMapping: inputMap,
+  targetProcessName = 'chrome';
+
+  // Create callable function for the hook
+  final lpfn = NativeCallable<HOOKPROC>.isolateLocal(
+    lowLevelKeyboardHookProc,
+    exceptionalReturn: 0,
   );
 
+  // Install the hook
+  keyHook = SetWindowsHookEx(
+    WINDOWS_HOOK_ID.WH_KEYBOARD_LL,
+    lpfn.nativeFunction,
+    NULL,
+    0,
+  );
+
+  if (keyHook == 0) {
+    print('Failed to install keyboard hook');
+    lpfn.close();
+    return;
+  }
+
+  print('Keyboard hook installed. Listening for key interception...');
+
+  // Message loop
+  final msg = calloc<MSG>();
   try {
-    interceptor.startListening();
-  } catch (e) {
-    print('Error: $e');
+    while (GetMessage(msg, NULL, 0, 0) != 0) {
+      TranslateMessage(msg);
+      DispatchMessage(msg);
+    }
+  } finally {
+    free(msg);
+    lpfn.close();
+    if (keyHook != 0) {
+      UnhookWindowsHookEx(keyHook);
+    }
   }
 }

@@ -1,18 +1,70 @@
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:ffi/ffi.dart';
 import 'package:win32/win32.dart';
 
+// Abstract base class for key interaction steps
+abstract class KeyStep {
+  void execute();
+}
+
+// Press a specific key
+class Press implements KeyStep {
+  final String key;
+
+  Press(this.key);
+
+  @override
+  void execute() {
+    final keyCode = _getVirtualKeyCode(key);
+    _sendKeyEvent(keyCode, isKeyUp: false);
+    _sendKeyEvent(keyCode, isKeyUp: true);
+  }
+
+  int _getVirtualKeyCode(String key) {
+    // Convert single character to its virtual key code
+    return key.toUpperCase().codeUnitAt(0);
+  }
+
+  void _sendKeyEvent(int keyCode, {required bool isKeyUp}) {
+    final input = calloc<INPUT>();
+    try {
+      input.ref.type = INPUT_TYPE.INPUT_KEYBOARD;
+      input.ref.ki.wVk = keyCode;
+      input.ref.ki.dwFlags = isKeyUp ? KEYBD_EVENT_FLAGS.KEYEVENTF_KEYUP : 0;
+
+      SendInput(1, input, sizeOf<INPUT>());
+    } finally {
+      free(input);
+    }
+  }
+}
+
+// Wait for a specified duration with optional random variation
+class Wait implements KeyStep {
+  final int baseMs;
+  final int varianceMs;
+
+  Wait(this.baseMs, this.varianceMs);
+
+  @override
+  void execute() {
+    final random = Random();
+    final variance = random.nextInt(2 * varianceMs + 1) - varianceMs;
+    final totalWaitTime = baseMs + variance;
+    sleep(Duration(milliseconds: totalWaitTime));
+  }
+}
+
 class KeyInterceptor {
   final String targetProcessName;
-  final int originalKeyCode;
-  final List<int> simulatedKeyCodes;
+  final Map<String, List<KeyStep>> inputMapping;
 
   KeyInterceptor({
     required this.targetProcessName,
-    required this.originalKeyCode,
-    required this.simulatedKeyCodes,
+    required this.inputMapping,
   });
 
   bool _isTargetWindowActive() {
@@ -64,48 +116,33 @@ class KeyInterceptor {
     }
   }
 
-  void _simulateKeyPress(List<int> keyCodes) {
-    for (final keyCode in keyCodes) {
-      // Key down events
-      _sendKeyEvent(keyCode, isKeyUp: false);
-    }
-
-    // Brief pause
-    sleep(const Duration(milliseconds: 10));
-
-    for (final keyCode in keyCodes) {
-      // Key up events
-      _sendKeyEvent(keyCode, isKeyUp: true);
-    }
-  }
-
-  void _sendKeyEvent(int keyCode, {required bool isKeyUp}) {
-    final input = calloc<INPUT>();
-    try {
-      input.ref.type = INPUT_TYPE.INPUT_KEYBOARD;
-      input.ref.ki.wVk = keyCode;
-      input.ref.ki.dwFlags = isKeyUp ? KEYBD_EVENT_FLAGS.KEYEVENTF_KEYUP : 0;
-
-      SendInput(1, input, sizeOf<INPUT>());
-    } finally {
-      free(input);
+  void _executeKeySequence(List<KeyStep> sequence) {
+    for (final step in sequence) {
+      step.execute();
     }
   }
 
   void startListening() {
     print('Listening for key interception...');
     while (true) {
-      // Check for key state
       if (_isTargetWindowActive()) {
-        final keyState = GetAsyncKeyState(originalKeyCode);
+        // Check each mapped input key
+        for (final entry in inputMapping.entries) {
+          final keyChar = entry.key;
+          final sequence = entry.value;
 
-        // Check if the key is newly pressed (most significant bit is 1)
-        if ((keyState & 0x8000) != 0) {
-          print('Intercepted key press');
-          _simulateKeyPress(simulatedKeyCodes);
+          // Convert key string to virtual key code
+          final keyCode = keyChar.toUpperCase().codeUnitAt(0);
 
-          // Brief pause to prevent multiple triggers
-          sleep(const Duration(milliseconds: 200));
+          // Check if the key is newly pressed
+          final keyState = GetAsyncKeyState(keyCode);
+          if ((keyState & 0x8000) != 0) {
+            print('Intercepted key press: $keyChar');
+            _executeKeySequence(sequence);
+
+            // Brief pause to prevent multiple triggers
+            sleep(const Duration(milliseconds: 200));
+          }
         }
       }
 
@@ -116,14 +153,30 @@ class KeyInterceptor {
 }
 
 void main() {
+  final outputA = [
+    Press("1"),
+    Wait(50, 20),
+    Press("2"),
+    Wait(45, 10),
+    Press("3"),
+    Wait(55, 15),
+  ];
+
+  final outputB = [
+    Press("Q"),
+    Wait(50, 20),
+    Press("W"),
+    Wait(45, 10),
+  ];
+
+  final inputMap = {
+    "2": outputA,
+    "5": outputB,
+  };
+
   final interceptor = KeyInterceptor(
-    targetProcessName: 'PathOfExile', // Target process name
-    originalKeyCode: 0x32, // Virtual key code for '2'
-    simulatedKeyCodes: [
-      0x31, // '1' key
-      0x32, // '2' key
-      0x33, // '3' key
-    ],
+    targetProcessName: 'PathOfExile.exe',
+    inputMapping: inputMap,
   );
 
   try {
